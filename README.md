@@ -30,9 +30,67 @@ An autonomous coding agent loop powered by Claude Code and Linear. The agent pic
 
 4. **Add specs** (optional): Drop specification documents into `specs/` for tasks that reference them.
 
-5. **Run the loop**:
+5. **Prepare your Linear backlog** — before running the loop, audit your Linear issues to make sure they're agent-ready. Paste the following prompt into ChatGPT / Claude and replace the project name with yours:
+
+   <details>
+   <summary>Backlog audit prompt</summary>
+
+   ```
+   You are acting as a senior engineering manager preparing a Linear project
+   backlog for autonomous development using a Ralph-style agent loop.
+
+   Project name: <YOUR PROJECT NAME>
+
+   Prepare the backlog so that tasks can be safely executed by an autonomous
+   coding agent. The agent can only work on tasks that are:
+     - clearly scoped
+     - implementable in one iteration
+     - technically well specified
+     - not dependent on missing work
+
+   Your job: Audit all issues in the Linear project and transform them into
+   agent-ready tasks. For each issue you must determine:
+     1. Is the task executable by an autonomous coding agent?
+     2. Is the scope small enough for a single implementation loop?
+     3. Are acceptance criteria present and clear?
+     4. Are dependencies clearly defined?
+     5. Is the issue an implementation task or something else?
+
+   If a task is too large, split it into multiple smaller tasks.
+
+   For each issue produce the following analysis:
+
+   Issue: <issue-id>
+   Title: <title>
+
+   Classification:
+     - implementation / research / architecture / product / manual / infra
+
+   Execution readiness:
+     - READY / NEEDS_SPLIT / NEEDS_SPEC / BLOCKED / MANUAL
+
+   Required labels: ready, needs-split, needs-spec, blocked, analysis, manual, agent-safe
+   Dependencies: List any prerequisite tasks.
+   Improved description: Rewrite the task description to be clear for an autonomous coding agent.
+   Acceptance criteria: Write concrete, testable acceptance criteria.
+   Scope notes: Explain what is explicitly OUT OF SCOPE.
+
+   If the issue must be split, propose 2–5 new tasks.
+
+   Your goal is to produce a backlog where tasks labeled ready + agent-safe
+   can be safely executed by an autonomous coding agent. Avoid vague
+   descriptions. Prefer small implementation tasks over large ones.
+   ```
+
+   </details>
+
+6. **Run the loop** — choose your agent:
    ```bash
-   ./afk-ralph.sh 5
+   # Using Claude Code
+   ./afk-ralph-claude.sh 5
+
+   # Using Codex
+   ./afk-ralph-codex.sh 5
    ```
 
 ## Customizing AGENT.md
@@ -103,7 +161,7 @@ Everything else in AGENT.md is generic loop infrastructure — you shouldn't nee
 
 ## How It Works
 
-Each loop iteration (managed by `afk-ralph.sh`):
+Each loop iteration (managed by `afk-ralph-claude.sh` or `afk-ralph-codex.sh`):
 
 1. **`scripts/fetch_linear_task.py`** queries Linear for the next task (resumes in-progress work first, then picks from backlog)
 2. The task is written to **`state/current-task.md`**
@@ -119,7 +177,8 @@ The agent outputs one of: `DONE`, `BLOCKED`, `FAILED`, or `NEEDS_SPLIT`.
 
 | File | Purpose |
 |------|---------|
-| `afk-ralph.sh` | Main entry point — orchestrates the fetch/implement/update loop |
+| `afk-ralph-claude.sh` | Main loop using Claude Code as the coding agent |
+| `afk-ralph-codex.sh` | Main loop using Codex as the coding agent |
 | `AGENT.md` | Repository rules, coding standards, and agent behavior constraints |
 | `PROMPT.md` | Per-iteration execution prompt — the agent's "instructions" each loop |
 | `scripts/common_linear.py` | Shared Linear GraphQL client |
@@ -131,14 +190,31 @@ The agent outputs one of: `DONE`, `BLOCKED`, `FAILED`, or `NEEDS_SPLIT`.
 
 ## Running
 
+### Claude Code
+
 ```bash
 # Run 5 iterations
-./afk-ralph.sh 5
+./afk-ralph-claude.sh 5
 
 # Override model and effort
-./afk-ralph.sh 10 --model opus --effort high
+./afk-ralph-claude.sh 10 --model opus --effort high
 
 # Defaults come from ~/.claude/settings.json (model + effortLevel)
+```
+
+### Codex
+
+```bash
+# Run 5 iterations
+./afk-ralph-codex.sh 5
+
+# Pass extra Codex flags via environment variables
+CODEX_ARGS="--full-auto -m gpt-5.4" ./afk-ralph-codex.sh 5
+
+# Environment variables:
+#   CODEX_CMD           Codex binary (default: codex)
+#   CODEX_ARGS          Extra Codex flags (e.g. --full-auto -m gpt-5.4)
+#   CODEX_SUBCOMMAND    Agent subcommand (default: exec)
 ```
 
 ## Tips
