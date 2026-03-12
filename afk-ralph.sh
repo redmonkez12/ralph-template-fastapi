@@ -1,4 +1,25 @@
 #!/usr/bin/env bash
+# afk-ralph.sh — Autonomous Ralph loop using Codex as the coding agent.
+#
+# Usage:
+#   ./afk-ralph.sh <iterations>
+#
+# Required env vars (set in .env or shell):
+#   LINEAR_API_KEY        — Linear personal API key
+#   LINEAR_PROJECT_NAME   — Exact project name in Linear (e.g. "My App")
+#
+# Optional env vars:
+#   CODEX_CMD         — Codex CLI binary or path (default: codex)
+#   CODEX_ARGS        — Extra flags for Codex (e.g. "--full-auto -m gpt-5.4")
+#   CODEX_SUBCOMMAND  — Agent subcommand (default: exec)
+#
+# Each iteration:
+#   1. Fetch one task from Linear (writes state/current-task.md)
+#   2. Mark issue as In Progress
+#   3. Run Codex on the task
+#   4. Parse structured result from agent output
+#   5. Update Linear with status and comment
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,29 +31,20 @@ if [ -f "$ROOT_DIR/.env" ]; then
   set +a
 fi
 
-# Defaults from settings.json
-CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
-CLAUDE_MODEL="sonnet"
-CLAUDE_EFFORT="high"
-if [ -f "$CLAUDE_SETTINGS" ]; then
-  _model="$(jq -r '.model // empty' "$CLAUDE_SETTINGS")"
-  _effort="$(jq -r '.effortLevel // empty' "$CLAUDE_SETTINGS")"
-  [ -n "$_model" ] && CLAUDE_MODEL="$_model"
-  [ -n "$_effort" ] && CLAUDE_EFFORT="$_effort"
-fi
+# Codex agent configuration.
+# CODEX_CMD: name or path of the Codex CLI binary.
+CODEX_CMD="${CODEX_CMD:-codex}"
+# CODEX_ARGS: extra flags passed to every Codex invocation.
+# Example: CODEX_ARGS="--full-auto -m gpt-5.4"
+CODEX_ARGS="${CODEX_ARGS:-}"
+# CODEX_SUBCOMMAND: optional subcommand for the agent CLI.
+# For Codex, "exec" is the correct non-interactive mode for scripted runs.
+CODEX_SUBCOMMAND="${CODEX_SUBCOMMAND:-exec}"
 
-# Parse arguments
+# Parse positional argument: number of loop iterations.
 ITERATIONS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --model)
-      CLAUDE_MODEL="$2"
-      shift 2
-      ;;
-    --effort)
-      CLAUDE_EFFORT="$2"
-      shift 2
-      ;;
     *)
       if [ -z "$ITERATIONS" ]; then
         ITERATIONS="$1"
@@ -46,7 +58,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$ITERATIONS" ]; then
-  echo "Usage: $0 <iterations> [--model <model>] [--effort <effort>]"
+  echo "Usage: $0 <iterations>"
+  echo ""
+  echo "Environment variables:"
+  echo "  LINEAR_API_KEY        required"
+  echo "  LINEAR_PROJECT_NAME   required"
+  echo "  CODEX_CMD             Codex binary (default: codex)"
+  echo "  CODEX_ARGS            Extra Codex flags (e.g. --full-auto -m gpt-5.4)"
+  echo "  CODEX_SUBCOMMAND      Agent subcommand (default: exec)"
   exit 1
 fi
 
@@ -58,6 +77,7 @@ AGENT_STATUS_FILE="$STATE_DIR/agent-status.json"
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 
+# Prevent concurrent runs via a PID lock file.
 if [ -f "$LOCK_FILE" ]; then
   echo "Ralph loop already running: $LOCK_FILE exists"
   exit 1
@@ -91,9 +111,8 @@ require_file "$ROOT_DIR/PROMPT.md"
 require_file "$SCRIPTS_DIR/fetch_linear_task.py"
 require_file "$SCRIPTS_DIR/update_linear_issue.py"
 
-require_cmd claude
+require_cmd "$CODEX_CMD"
 require_cmd python3
-require_cmd jq
 
 if [ -z "${LINEAR_API_KEY:-}" ]; then
   echo "Missing LINEAR_API_KEY"
@@ -106,10 +125,249 @@ if [ -z "${LINEAR_PROJECT_NAME:-}" ]; then
   exit 1
 fi
 
+IS_GIT_REPO=0
+if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  IS_GIT_REPO=1
+fi
+
+# run_agent <prompt> <log_file>
+# Runs Codex with the given task prompt in non-interactive mode.
+# Streams combined stdout+stderr to log_file in real time.
+# Sets the global variable $result to the full captured output.
+run_agent() {
+  local prompt="$1"
+  local log_file="$2"
+  local -a codex_cmd=("$CODEX_CMD" "$CODEX_SUBCOMMAND")
+  # --full-auto and --dangerously-bypass-approvals-and-sandbox are mutually exclusive in Codex
+  if [[ "$CODEX_ARGS" == *"--full-auto"* ]]; then
+    : # --full-auto already implies full sandbox bypass
+  else
+    codex_cmd+=(--dangerously-bypass-approvals-and-sandbox)
+  fi
+  codex_cmd+=(--color never -C "$ROOT_DIR")
+  local -a extra_args=()
+  if [ "$IS_GIT_REPO" -eq 0 ]; then
+    codex_cmd+=(--skip-git-repo-check)
+  fi
+  if [ -n "$CODEX_ARGS" ]; then
+    # shellcheck disable=SC2206
+    extra_args=($CODEX_ARGS)
+  fi
+  result="$("${codex_cmd[@]}" "${extra_args[@]}" "$prompt" 2>&1 | tee -a "$log_file")" || true
+}
+
+# parse_codex_args — extract model and reasoning-effort from CODEX_ARGS.
+# Sets globals: agent_model, agent_effort.
+parse_codex_args() {
+  agent_model=""
+  agent_effort=""
+  [ -z "$CODEX_ARGS" ] && return
+  local -a args
+  read -ra args <<< "$CODEX_ARGS"
+  local i=0
+  while [ $i -lt ${#args[@]} ]; do
+    case "${args[$i]}" in
+      -m|--model)
+        i=$((i+1)); [ $i -lt ${#args[@]} ] && agent_model="${args[$i]}" ;;
+      --reasoning-effort)
+        i=$((i+1)); [ $i -lt ${#args[@]} ] && agent_effort="${args[$i]}" ;;
+    esac
+    i=$((i+1))
+  done
+}
+
+# write_agent_status <running> <issue_id> <issue_title> <started_at>
+# Writes state/agent-status.json describing the current agent invocation.
+write_agent_status() {
+  local running="$1" issue_id="${2:-}" issue_title="${3:-}" started_at="${4:-}"
+  RALPH_RUNNING="$running" \
+  RALPH_AGENT_TYPE="$(basename "$CODEX_CMD")" \
+  RALPH_MODEL="${agent_model:-}" \
+  RALPH_EFFORT="${agent_effort:-}" \
+  RALPH_PID="$$" \
+  RALPH_ISSUE_ID="$issue_id" \
+  RALPH_ISSUE_TITLE="$issue_title" \
+  RALPH_STARTED_AT="$started_at" \
+  RALPH_COMMAND="$CODEX_CMD $CODEX_SUBCOMMAND${CODEX_ARGS:+ $CODEX_ARGS}" \
+  python3 - <<'PYEOF' > "$AGENT_STATUS_FILE"
+import json, os
+print(json.dumps({
+    "running": os.environ["RALPH_RUNNING"] == "true",
+    "agentType": os.environ.get("RALPH_AGENT_TYPE", ""),
+    "model": os.environ.get("RALPH_MODEL", ""),
+    "reasoningEffort": os.environ.get("RALPH_EFFORT", ""),
+    "pid": int(os.environ.get("RALPH_PID", "0")),
+    "issueId": os.environ.get("RALPH_ISSUE_ID", ""),
+    "issueTitle": os.environ.get("RALPH_ISSUE_TITLE", ""),
+    "startedAt": os.environ.get("RALPH_STARTED_AT", ""),
+    "command": os.environ.get("RALPH_COMMAND", ""),
+}, indent=2))
+PYEOF
+}
+
+# extract_linear_comment <text>
+# Extracts the LINEAR_COMMENT block from structured agent output.
+extract_linear_comment() {
+  printf "%s\n" "$1" | awk '
+    BEGIN {capture=0}
+    /^LINEAR_COMMENT:/ {capture=1; sub(/^LINEAR_COMMENT:[[:space:]]*/, ""); if (length) print; next}
+    capture==1 {print}
+  '
+}
+
+# extract_acceptance_criteria <text>
+# Extracts the ACCEPTANCE_CRITERIA block from structured agent output.
+extract_acceptance_criteria() {
+  printf "%s\n" "$1" | awk '
+    BEGIN {capture=0}
+    /^ACCEPTANCE_CRITERIA:/ {capture=1; next}
+    capture==1 && /^[A-Z_][A-Z_]*:/ {capture=0}
+    capture==1 {print}
+  '
+}
+
+# extract_tests_run <text>
+# Extracts the TESTS_RUN block from structured agent output.
+extract_tests_run() {
+  printf "%s\n" "$1" | awk '
+    BEGIN {capture=0}
+    /^TESTS_RUN:/ {capture=1; next}
+    capture==1 && /^[A-Z_][A-Z_]*:/ {capture=0}
+    capture==1 {print}
+  '
+}
+
+# extract_commit_message <text>
+# Extracts the COMMIT_MESSAGE field from structured agent output.
+extract_commit_message() {
+  printf "%s\n" "$1" | awk '
+    /^COMMIT_MESSAGE:/ {sub(/^COMMIT_MESSAGE:[[:space:]]*/, ""); print; exit}
+  '
+}
+
+# commit_and_push <issue_id> <issue_title> <log_file>
+# Commits the agent's working-tree changes and pushes to main.
+# Falls back to a generated commit message if the agent didn't provide one.
+commit_and_push() {
+  local issue_id="$1" issue_title="$2" log_file="$3"
+  local commit_msg
+
+  commit_msg="$(extract_commit_message "$result")"
+  if [ -z "$commit_msg" ] || [ "$commit_msg" = "N/A" ]; then
+    # Generate a conventional commit message from the issue title
+    local scope
+    scope="$(echo "$issue_title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-30)"
+    commit_msg="feat($scope): $issue_title ($issue_id)"
+  fi
+
+  local files_changed
+  files_changed="$(extract_files_changed "$result")"
+
+  if [ -n "$files_changed" ]; then
+    # Stage only the files the agent reported changing (strip leading "- ")
+    echo "$files_changed" | sed 's/^- //' | while IFS= read -r f; do
+      [ -n "$f" ] && git -C "$ROOT_DIR" add "$f" 2>/dev/null || true
+    done
+  fi
+
+  # Also stage any remaining tracked modifications the agent may have missed
+  git -C "$ROOT_DIR" add -u 2>/dev/null || true
+
+  # Check if there is anything to commit
+  if git -C "$ROOT_DIR" diff --cached --quiet 2>/dev/null; then
+    echo "No staged changes to commit." | tee -a "$log_file"
+    return 0
+  fi
+
+  git -C "$ROOT_DIR" commit -m "$commit_msg" 2>&1 | tee -a "$log_file"
+  git -C "$ROOT_DIR" push origin main 2>&1 | tee -a "$log_file"
+}
+
+# extract_files_changed <text>
+# Extracts the FILES_CHANGED block from structured agent output.
+extract_files_changed() {
+  printf "%s\n" "$1" | awk '
+    BEGIN {capture=0}
+    /^FILES_CHANGED:/ {capture=1; next}
+    capture==1 && /^[A-Z_][A-Z_]*:/ {capture=0}
+    capture==1 {print}
+  '
+}
+
+# prompt_human_validation <issue_id> <issue_title> <log_file>
+# When the agent wrote code but couldn't validate, pause and let the human
+# run tests interactively. Returns 0 if the human marks it done, 1 otherwise.
+prompt_human_validation() {
+  local issue_id="$1" issue_title="$2" log_file="$3"
+
+  echo ""
+  echo "╔══════════════════════════════════════════════════════════════╗"
+  echo "║  HUMAN VALIDATION NEEDED                                    ║"
+  echo "╚══════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "Issue: $issue_id — $issue_title"
+  echo ""
+
+  local files_changed
+  files_changed="$(extract_files_changed "$result")"
+  if [ -n "$files_changed" ]; then
+    echo "Files changed:"
+    echo "$files_changed"
+    echo ""
+  fi
+
+  local tests_run
+  tests_run="$(extract_tests_run "$result")"
+  if [ -n "$tests_run" ]; then
+    echo "Agent suggested these test commands:"
+    echo "$tests_run"
+    echo ""
+  else
+    echo "Agent did not specify test commands. Check the log:"
+    echo "  $log_file"
+    echo ""
+  fi
+
+  echo "The agent wrote code but could not run validation (sandbox/network limitation)."
+  echo ""
+  echo "Options:"
+  echo "  [t] Open a shell to test manually, then decide"
+  echo "  [d] Mark as DONE (you verified it works)"
+  echo "  [b] Mark as BLOCKED (keep in backlog)"
+  echo "  [s] Skip (leave in progress, handle later)"
+  echo ""
+
+  while true; do
+    read -rp "Choice [t/d/b/s]: " choice
+    case "$choice" in
+      t|T)
+        echo ""
+        echo "Dropping into a subshell. Run your tests, then type 'exit'."
+        echo "Working directory: $ROOT_DIR"
+        echo ""
+        (cd "$ROOT_DIR" && "${SHELL:-bash}")
+        echo ""
+        read -rp "Tests done. Mark as [d]one or [b]locked? " post_choice
+        case "$post_choice" in
+          d|D) return 0 ;;
+          *)   return 1 ;;
+        esac
+        ;;
+      d|D) return 0 ;;
+      b|B) return 1 ;;
+      s|S) return 2 ;;
+      *)   echo "Invalid choice. Enter t, d, b, or s." ;;
+    esac
+  done
+}
+
+parse_codex_args
+
+# Main loop — run one task per iteration.
 for ((i=1; i<=ITERATIONS; i++)); do
   echo
   echo "===================================================="
-  echo "Ralph iteration $i / $ITERATIONS | model: $CLAUDE_MODEL | effort: $CLAUDE_EFFORT"
+  echo "Ralph iteration $i / $ITERATIONS | agent: $CODEX_CMD $CODEX_ARGS"
   echo "===================================================="
 
   timestamp="$(date +"%Y-%m-%dT%H-%M-%S")"
@@ -139,121 +397,132 @@ for ((i=1; i<=ITERATIONS; i++)); do
   python3 "$SCRIPTS_DIR/update_linear_issue.py" start "$issue_id" \
     | tee -a "$run_log"
 
-  echo "[3/5] Running coding agent for $issue_id ($issue_title)..."
+  echo "[3/5] Running Codex agent for $issue_id ($issue_title)..."
+  if [ "$IS_GIT_REPO" -eq 0 ]; then
+    echo "Workspace is not a Git repository; running Codex with --skip-git-repo-check." | tee -a "$run_log"
+  fi
 
-  agent_prompt="$(cat <<'AGENT_EOF'
-Read AGENT.md, PROMPT.md, and state/current-task.md before doing anything.
-Implement exactly the issue described in state/current-task.md.
-Do not work on any other issue.
-Follow AGENT.md and PROMPT.md strictly.
-Return the final result in the required structured format at the end.
-AGENT_EOF
-  )"
+  # The agent prompt tells Codex which files to read and what to produce.
+  # AGENT.md contains coding rules; PROMPT.md contains the full execution spec;
+  # state/current-task.md contains the specific issue to implement.
+  agent_prompt="Read AGENT.md, PROMPT.md, and state/current-task.md before doing anything. \
+Implement exactly the issue described in state/current-task.md. \
+Do not work on any other issue. \
+Follow AGENT.md and PROMPT.md strictly. \
+At the end, output the structured result block exactly as specified in PROMPT.md, \
+starting with STATUS: on its own line. \
+The structured block must be the last thing you print."
 
-  jq -n \
-    --argjson running true \
-    --arg agentType "claude" \
-    --arg model "$CLAUDE_MODEL" \
-    --arg reasoningEffort "$CLAUDE_EFFORT" \
-    --argjson pid $$ \
-    --arg issueId "$issue_id" \
-    --arg issueTitle "$issue_title" \
-    --arg startedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    --arg command "claude --dangerously-skip-permissions --model $CLAUDE_MODEL --effort $CLAUDE_EFFORT -p <prompt>" \
-    '{running:$running,agentType:$agentType,model:$model,reasoningEffort:$reasoningEffort,pid:$pid,issueId:$issueId,issueTitle:$issueTitle,startedAt:$startedAt,command:$command}' \
-    > "$AGENT_STATUS_FILE"
+  # Write runtime status so the watcher UI knows which agent is running.
+  started_at="$(date -Iseconds)"
+  write_agent_status true "$issue_id" "$issue_title" "$started_at"
 
-  result="$(
-    claude --dangerously-skip-permissions \
-      --model "$CLAUDE_MODEL" \
-      --effort "$CLAUDE_EFFORT" \
-      -p "$agent_prompt" \
-      2>&1
-  )"
-
-  jq '.running = false' "$AGENT_STATUS_FILE" > "${AGENT_STATUS_FILE}.tmp" \
-    && mv "${AGENT_STATUS_FILE}.tmp" "$AGENT_STATUS_FILE"
-
-  echo "$result" | tee -a "$run_log"
-
-  # Ensure the agent didn't break infrastructure scripts
-  for script in "$SCRIPTS_DIR/fetch_linear_task.py" "$SCRIPTS_DIR/update_linear_issue.py"; do
-    if ! python3 -m py_compile "$script" 2>/dev/null; then
-      echo "WARNING: $script has syntax errors after agent run, restoring from git"
-      git checkout -- "$script"
-    fi
-  done
+  # Run the agent; result is set by run_agent().
+  result=""
+  run_agent "$agent_prompt" "$run_log"
 
   echo "[4/5] Parsing agent result..."
 
-  if [[ "$result" == *"STATUS: DONE"* ]]; then
+  # Extract the STATUS line from the log file to avoid broken-pipe errors
+  # that occur on macOS when piping large $result through echo | grep.
+  agent_status="$(grep -i "^STATUS:" "$run_log" | tail -1 || true)"
+
+  if echo "$agent_status" | grep -qi "DONE"; then
     echo "Task completed."
-
-    linear_comment="$(printf "%s\n" "$result" | awk '
-      BEGIN {capture=0}
-      /^LINEAR_COMMENT:/ {capture=1; sub(/^LINEAR_COMMENT:[[:space:]]*/, ""); print; next}
-      capture==1 {print}
-    ')"
-
-    if [ -z "$linear_comment" ]; then
-      linear_comment="Agent completed the task and validation passed."
+    if [ "$IS_GIT_REPO" -eq 1 ]; then
+      echo "Committing and pushing agent changes..."
+      commit_and_push "$issue_id" "$issue_title" "$run_log"
     fi
-
+    linear_comment="$(extract_linear_comment "$result")"
+    [ -z "$linear_comment" ] && linear_comment="Agent completed the task and validation passed."
     echo "[5/5] Updating Linear as In Review..."
-    python3 "$SCRIPTS_DIR/update_linear_issue.py" done "$issue_id" "$linear_comment" \
+    RALPH_ACCEPTANCE_CRITERIA="$(extract_acceptance_criteria "$result")" \
+      python3 "$SCRIPTS_DIR/update_linear_issue.py" done "$issue_id" "$linear_comment" \
       | tee -a "$run_log"
 
-  elif [[ "$result" == *"STATUS: BLOCKED"* ]]; then
+  elif echo "$agent_status" | grep -qi "BLOCKED"; then
     echo "Task is blocked."
+    linear_comment="$(extract_linear_comment "$result")"
+    [ -z "$linear_comment" ] && linear_comment="Agent marked the issue as blocked."
 
-    linear_comment="$(printf "%s\n" "$result" | awk '
-      BEGIN {capture=0}
-      /^LINEAR_COMMENT:/ {capture=1; sub(/^LINEAR_COMMENT:[[:space:]]*/, ""); print; next}
-      capture==1 {print}
-    ')"
+    # If running interactively, offer human validation before giving up.
+    if [ -t 0 ]; then
+      human_result=0
+      prompt_human_validation "$issue_id" "$issue_title" "$run_log" || human_result=$?
 
-    if [ -z "$linear_comment" ]; then
-      linear_comment="Agent marked the issue as blocked."
+      if [ "$human_result" -eq 0 ]; then
+        if [ "$IS_GIT_REPO" -eq 1 ]; then
+          echo "Committing and pushing agent changes..."
+          commit_and_push "$issue_id" "$issue_title" "$run_log"
+        fi
+        echo "[5/5] Human validated. Updating Linear as Done..."
+        RALPH_ACCEPTANCE_CRITERIA="$(extract_acceptance_criteria "$result")" \
+          python3 "$SCRIPTS_DIR/update_linear_issue.py" done "$issue_id" \
+            "Agent wrote code, human validated and confirmed. Original agent note: $linear_comment" \
+          | tee -a "$run_log"
+      elif [ "$human_result" -eq 2 ]; then
+        echo "Skipped — task left in current state."
+      else
+        python3 "$SCRIPTS_DIR/update_linear_issue.py" blocked "$issue_id" "$linear_comment" \
+          | tee -a "$run_log"
+      fi
+    else
+      python3 "$SCRIPTS_DIR/update_linear_issue.py" blocked "$issue_id" "$linear_comment" \
+        | tee -a "$run_log"
     fi
 
-    python3 "$SCRIPTS_DIR/update_linear_issue.py" blocked "$issue_id" "$linear_comment" \
-      | tee -a "$run_log"
-
-  elif [[ "$result" == *"STATUS: NEEDS_SPLIT"* ]]; then
+  elif echo "$agent_status" | grep -qi "NEEDS_SPLIT"; then
     echo "Task needs split."
-
-    linear_comment="$(printf "%s\n" "$result" | awk '
-      BEGIN {capture=0}
-      /^LINEAR_COMMENT:/ {capture=1; sub(/^LINEAR_COMMENT:[[:space:]]*/, ""); print; next}
-      capture==1 {print}
-    ')"
-
-    if [ -z "$linear_comment" ]; then
-      linear_comment="Agent marked the issue as too large and needing split."
-    fi
-
+    linear_comment="$(extract_linear_comment "$result")"
+    [ -z "$linear_comment" ] && linear_comment="Agent marked the issue as too large and needing split."
     python3 "$SCRIPTS_DIR/update_linear_issue.py" needs_split "$issue_id" "$linear_comment" \
       | tee -a "$run_log"
 
-  elif [[ "$result" == *"STATUS: FAILED"* ]]; then
+  elif echo "$agent_status" | grep -qi "FAILED"; then
     echo "Task failed."
-
-    linear_comment="$(printf "%s\n" "$result" | awk '
-      BEGIN {capture=0}
-      /^LINEAR_COMMENT:/ {capture=1; sub(/^LINEAR_COMMENT:[[:space:]]*/, ""); print; next}
-      capture==1 {print}
-    ')"
-
-    if [ -z "$linear_comment" ]; then
-      linear_comment="Agent failed while implementing the issue."
-    fi
-
+    linear_comment="$(extract_linear_comment "$result")"
+    [ -z "$linear_comment" ] && linear_comment="Agent failed while implementing the issue."
     python3 "$SCRIPTS_DIR/update_linear_issue.py" failed "$issue_id" "$linear_comment" \
+      | tee -a "$run_log"
+
+  elif grep -q "Not inside a trusted directory and --skip-git-repo-check was not specified." "$run_log"; then
+    echo "Codex aborted before producing a structured result because Git repo checks were not bypassed."
+    echo "Raw output saved to: $run_log"
+    python3 "$SCRIPTS_DIR/update_linear_issue.py" blocked "$issue_id" \
+      "Agent aborted: Git repo trust check failed (--skip-git-repo-check not set). Raw log: $run_log" \
       | tee -a "$run_log"
 
   else
     echo "Unknown agent result format. Raw output saved to: $run_log"
+    if [ -t 0 ]; then
+      human_result=0
+      prompt_human_validation "$issue_id" "$issue_title" "$run_log" || human_result=$?
+
+      if [ "$human_result" -eq 0 ]; then
+        if [ "$IS_GIT_REPO" -eq 1 ]; then
+          echo "Committing and pushing agent changes..."
+          commit_and_push "$issue_id" "$issue_title" "$run_log"
+        fi
+        echo "[5/5] Human validated. Updating Linear as Done..."
+        RALPH_ACCEPTANCE_CRITERIA="$(extract_acceptance_criteria "$result")" \
+          python3 "$SCRIPTS_DIR/update_linear_issue.py" done "$issue_id" \
+            "Agent output was unparseable but human validated the work." \
+          | tee -a "$run_log"
+      elif [ "$human_result" -eq 2 ]; then
+        echo "Skipped — task left in current state."
+      else
+        python3 "$SCRIPTS_DIR/update_linear_issue.py" blocked "$issue_id" \
+          "Agent produced unrecognized output (no STATUS line found). Raw log: $run_log" \
+          | tee -a "$run_log"
+      fi
+    else
+      python3 "$SCRIPTS_DIR/update_linear_issue.py" blocked "$issue_id" \
+        "Agent produced unrecognized output (no STATUS line found). Raw log: $run_log" \
+        | tee -a "$run_log"
+    fi
   fi
+
+  write_agent_status false "$issue_id" "$issue_title" "$started_at"
 done
 
 echo
