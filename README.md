@@ -43,6 +43,24 @@ AGENT.md contains two sections marked with `<!-- CUSTOMIZE -->` comments:
 
 Replace the placeholder with your project's tech stack and goals. This tells the agent what it's working on.
 
+**Python example:**
+```markdown
+## Repository Context
+
+This project is a Python backend built with:
+
+- Python 3.14
+- uv
+- FastAPI
+- PostgreSQL
+- modular monolith architecture
+
+Primary goals:
+- ship clean MVP features fast
+- keep architecture simple
+```
+
+**TypeScript example:**
 ```markdown
 ## Repository Context
 
@@ -62,12 +80,23 @@ Primary goals:
 
 Replace the placeholder with coding standards for your language(s) and frameworks.
 
+**Python example:**
+```markdown
+### Python
+- Use modern Python 3.14 features when they improve clarity.
+- Follow existing style in the repository.
+- Prefer type hints on public/internal interfaces where appropriate.
+- Keep Pydantic / schema definitions clean and explicit.
+- Keep FastAPI route handlers thin when possible.
+- Put business logic outside route handlers when non-trivial.
+```
+
+**TypeScript example:**
 ```markdown
 ### TypeScript
 - Use strict TypeScript — no `any` unless unavoidable.
 - Prefer interfaces over type aliases for object shapes.
 - Use named exports over default exports.
-- Keep Express middleware thin.
 ```
 
 Everything else in AGENT.md is generic loop infrastructure — you shouldn't need to change it unless you want to customize the agent's behavior.
