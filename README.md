@@ -7,7 +7,8 @@ An autonomous coding agent loop powered by Claude Code and Linear. The agent pic
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - A [Linear](https://linear.app) account with an API key
 - A Linear project with issues in the backlog
-- Git repository for your actual project (this template lives alongside it or is integrated into it)
+- `jq` installed (`brew install jq` on macOS)
+- Python 3.10+
 
 ## Quick Start
 
@@ -31,8 +32,7 @@ An autonomous coding agent loop powered by Claude Code and Linear. The agent pic
 
 5. **Run the loop**:
    ```bash
-   source .env
-   while :; do cat PROMPT.md | claude --dangerously-skip-permissions -p - ; done
+   ./afk-ralph.sh 5
    ```
 
 ## Customizing AGENT.md
@@ -74,14 +74,15 @@ Everything else in AGENT.md is generic loop infrastructure — you shouldn't nee
 
 ## How It Works
 
-Each loop iteration:
+Each loop iteration (managed by `afk-ralph.sh`):
 
 1. **`scripts/fetch_linear_task.py`** queries Linear for the next task (resumes in-progress work first, then picks from backlog)
 2. The task is written to **`state/current-task.md`**
-3. Claude reads **AGENT.md** + **PROMPT.md** + the task context
-4. Claude implements the task, runs validation, commits, and pushes
-5. **`scripts/update_linear_issue.py`** updates the Linear issue status and adds a comment
-6. The loop restarts
+3. The issue is marked **In Progress** in Linear
+4. Claude reads **AGENT.md** + **PROMPT.md** + the task context
+5. Claude implements the task, runs validation, commits, and pushes
+6. **`scripts/update_linear_issue.py`** updates the Linear issue status and adds a comment
+7. The loop restarts for the next iteration
 
 The agent outputs one of: `DONE`, `BLOCKED`, `FAILED`, or `NEEDS_SPLIT`.
 
@@ -89,9 +90,9 @@ The agent outputs one of: `DONE`, `BLOCKED`, `FAILED`, or `NEEDS_SPLIT`.
 
 | File | Purpose |
 |------|---------|
+| `afk-ralph.sh` | Main entry point — orchestrates the fetch/implement/update loop |
 | `AGENT.md` | Repository rules, coding standards, and agent behavior constraints |
 | `PROMPT.md` | Per-iteration execution prompt — the agent's "instructions" each loop |
-| `RALPH.md` | Quick-reference run commands |
 | `scripts/common_linear.py` | Shared Linear GraphQL client |
 | `scripts/fetch_linear_task.py` | Picks the next task from Linear and writes `state/current-task.md` |
 | `scripts/update_linear_issue.py` | Updates Linear issue state and adds comments |
@@ -101,16 +102,14 @@ The agent outputs one of: `DONE`, `BLOCKED`, `FAILED`, or `NEEDS_SPLIT`.
 
 ## Running
 
-See `RALPH.md` for the run commands, or use:
-
 ```bash
-# Interactive mode (you see each step, can intervene)
-source .env
-while :; do cat PROMPT.md | claude --dangerously-skip-permissions ; done
+# Run 5 iterations
+./afk-ralph.sh 5
 
-# Autonomous mode (fully hands-off)
-source .env
-while :; do cat PROMPT.md | claude --dangerously-skip-permissions -p - ; done
+# Override model and effort
+./afk-ralph.sh 10 --model opus --effort high
+
+# Defaults come from ~/.claude/settings.json (model + effortLevel)
 ```
 
 ## Tips
@@ -120,3 +119,5 @@ while :; do cat PROMPT.md | claude --dangerously-skip-permissions -p - ; done
 - Parent issues with sub-issues are automatically skipped (the agent picks leaf tasks)
 - The agent auto-unblocks issues when their blocking issues are completed
 - Add detailed specs to `specs/` for complex tasks — reference them in the Linear issue description
+- A lock file (`state/ralph.lock`) prevents concurrent runs
+- Logs are saved to `logs/ralph-<timestamp>.log` for each iteration
