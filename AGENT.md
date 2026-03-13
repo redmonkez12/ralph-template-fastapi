@@ -34,9 +34,10 @@ Before making any changes, read in this order:
 
 1. `state/current-task.md`
 2. `PROMPT.md`
-3. Relevant files from `specs/` referenced by `state/current-task.md`
-4. Relevant source files only
-5. Relevant existing tests only
+3. `CLAUDE.md` (skill routing -- read the relevant skill for your task area)
+4. Relevant files from `specs/` referenced by `state/current-task.md`
+5. Relevant source files only
+6. Relevant existing tests only
 
 Do not read or scan the whole repository unless necessary.
 
@@ -44,25 +45,18 @@ Do not read or scan the whole repository unless necessary.
 
 ## Repository Context
 
-<!-- CUSTOMIZE: Describe your project's tech stack and goals.
-     Replace this entire comment block with your project's details.
+This project is a minimal full-stack monorepo built with:
 
-Example:
-
-This project is a Python backend built with:
-
-- Python 3.14
-- uv
-- FastAPI
-- PostgreSQL
-- modular monolith architecture
+- Bun workspaces
+- Turborepo
+- Next.js App Router + TypeScript in `apps/web`
+- FastAPI + uv in `apps/api`
 
 Primary goals:
-- ship clean MVP features fast
-- keep architecture simple
-- preserve future extensibility
-- keep operational complexity low
--->
+- keep the starter runnable with minimal setup
+- preserve clear boundaries between the web and api apps
+- keep agent-driven changes small and reviewable
+- favor simple, explicit patterns over clever abstractions
 
 ---
 
@@ -96,6 +90,12 @@ You may change only what is necessary to complete the current issue, including:
 
 Avoid unrelated file churn.
 
+For this monorepo:
+- touch `apps/web` only for UI, page, component, or frontend integration work
+- touch `apps/api` only for API, backend, schema, or service work
+- touch both apps only when the task requires a contract change or end-to-end behavior
+- keep frontend/backend boundaries explicit; do not duplicate domain logic across both apps
+
 ---
 
 ## Coding Standards
@@ -109,25 +109,21 @@ Avoid unrelated file churn.
 
 ### Language-Specific
 
-<!-- CUSTOMIZE: Add coding standards specific to your project's language(s) and frameworks.
-     Replace this entire comment block with your standards.
+#### TypeScript / Next.js
 
-Example for Python:
+- Use strict TypeScript. Avoid `any`.
+- Prefer server-safe, framework-native patterns before adding libraries.
+- Keep `apps/web` components small and explicit.
+- Treat environment variables read in the browser as public and prefix them with `NEXT_PUBLIC_`.
+- Prefer simple data-fetching and loading/error states over premature abstraction.
 
-- Use modern Python 3.14 features when they improve clarity.
-- Follow existing style in the repository.
-- Prefer type hints on public/internal interfaces where appropriate.
-- Keep Pydantic / schema definitions clean and explicit.
-- Keep FastAPI route handlers thin when possible.
-- Put business logic outside route handlers when non-trivial.
-- NEVER remove parentheses from multi-exception except clauses.
+#### Python / FastAPI
 
-Example for TypeScript:
-
-- Use strict TypeScript — no `any` unless unavoidable.
-- Prefer interfaces over type aliases for object shapes.
-- Use named exports over default exports.
--->
+- Use type hints on public and internal interfaces.
+- Keep FastAPI route handlers thin.
+- Put non-trivial logic outside route definitions.
+- Keep settings/env handling explicit.
+- Preserve predictable response shapes for API routes.
 
 ### Data / Persistence
 - Keep migrations deterministic and reviewable.
@@ -161,6 +157,23 @@ Prefer:
 - targeted tests first
 - broader test runs second if needed
 
+In this repo, prefer root monorepo commands when they cover the changed area:
+
+- `bun run lint`
+- `bun run typecheck`
+- `bun run test`
+- `bun run build`
+
+Use narrower app-level commands when the task is isolated to one app:
+
+- `cd apps/web && bun run lint`
+- `cd apps/web && bun run typecheck`
+- `cd apps/web && bun run build`
+- `cd apps/api && bun run lint`
+- `cd apps/api && bun run typecheck`
+- `cd apps/api && bun run test`
+- `cd apps/api && uv run pytest tests/test_health.py`
+
 Do not claim success without actually running validation commands.
 
 If tests cannot be run, state that explicitly in the final output.
@@ -177,7 +190,7 @@ A task is DONE only if all of the following are true:
 4. Relevant validation was run.
 5. No unrelated work was included.
 6. Progress/state files were updated.
-7. Changes are committed and pushed to the remote branch.
+7. Changes are committed and pushed to `main`.
 8. The change is ready for review.
 
 If any of the above is not true, do not mark the task as DONE.
@@ -286,10 +299,10 @@ Make concise, reviewable changes. **You MUST commit and push before finishing th
 
 ### Required steps after validation passes:
 
-1. Create or switch to the branch from the Linear issue's `gitBranchName`
+1. Ensure you are on `main`
 2. Stage only the files you changed for this task (no `git add -A` or `git add .`)
 3. Commit with a conventional scoped message
-4. Push to remote with `git push -u origin <branch-name>`
+4. Push to remote with `git push origin main`
 5. Verify the push succeeded
 
 Commit message style:
@@ -328,6 +341,7 @@ And include this structure:
 
 STATUS: <DONE|BLOCKED|FAILED|NEEDS_SPLIT>
 ISSUE: <issue-id>
+TITLE: <issue title>
 SUMMARY: <short summary>
 FILES_CHANGED:
 - <file>

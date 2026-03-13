@@ -9,6 +9,17 @@ You must follow repository rules from `AGENT.md`.
 
 ---
 
+## Repository Context
+
+This repository is a full-stack monorepo:
+
+- `apps/web` contains the Next.js App Router frontend
+- `apps/api` contains the FastAPI backend
+
+The current task may affect the web app, the API, or both. Touch only the app(s) required for the issue and keep shared behavior consistent across the boundary when a task spans both.
+
+---
+
 ## Objective
 
 Complete exactly one Linear task for this iteration.
@@ -90,14 +101,16 @@ When implementing:
 
 1. make the smallest clean change that satisfies the issue
 2. preserve existing conventions and module boundaries
-3. keep route handlers thin if using FastAPI
-4. keep business logic out of transport/controller code when non-trivial
-5. use explicit and readable code
-6. avoid speculative abstractions
-7. do not broaden scope to "improve things while here"
-8. preserve security, auth, and permission boundaries
-9. keep migrations minimal and reviewable
-10. keep tests proportional to the change
+3. keep `apps/web` and `apps/api` responsibilities clearly separated
+4. keep route handlers thin if using FastAPI
+5. keep business logic out of transport/controller code when non-trivial
+6. avoid exposing server-only secrets or config to client-side code
+7. use explicit and readable code
+8. avoid speculative abstractions
+9. do not broaden scope to "improve things while here"
+10. preserve security, auth, and permission boundaries
+11. keep migrations minimal and reviewable
+12. keep tests proportional to the change
 
 If a tiny local cleanup is needed to support the task safely, that is allowed.
 Anything broader is not allowed unless explicitly required.
@@ -117,11 +130,20 @@ Also run if configured in the repo:
 - type checks
 
 Examples may include commands such as:
-- `uv run pytest`
-- `uv run pytest path/to/test_file.py`
-- `uv run ruff check .`
-- `uv run ruff format --check .`
-- `uv run mypy .`
+- `bun run lint`
+- `bun run typecheck`
+- `bun run test`
+- `bun run build`
+- `cd apps/web && bun run lint`
+- `cd apps/web && bun run typecheck`
+- `cd apps/web && bun run build`
+- `cd apps/api && bun run lint`
+- `cd apps/api && bun run typecheck`
+- `cd apps/api && bun run test`
+- `cd apps/api && uv run pytest`
+- `cd apps/api && uv run pytest tests/test_health.py`
+- `cd apps/api && uv run ruff check .`
+- `cd apps/api && uv run mypy app tests`
 
 Use repository-specific commands from `AGENT.md` when provided.
 

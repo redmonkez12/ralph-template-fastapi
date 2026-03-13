@@ -1,0 +1,10 @@
+{
+  "name": "@ralph-template/api",
+  "private": true,
+  "scripts": {
+    "dev": "PYTHONPATH=. TMPDIR=/tmp UV_CACHE_DIR=.uv-cache uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "lint": "TMPDIR=/tmp UV_CACHE_DIR=.uv-cache uv run ruff check .",
+    "typecheck": "TMPDIR=/tmp UV_CACHE_DIR=.uv-cache uv run mypy app tests",
+    "test": "PYTHONPATH=. TMPDIR=/tmp UV_CACHE_DIR=.uv-cache uv run pytest"
+  }
+}

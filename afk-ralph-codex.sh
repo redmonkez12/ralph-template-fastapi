@@ -406,7 +406,9 @@ for ((i=1; i<=ITERATIONS; i++)); do
   # AGENT.md contains coding rules; PROMPT.md contains the full execution spec;
   # state/current-task.md contains the specific issue to implement.
   agent_prompt="Read AGENT.md, PROMPT.md, and state/current-task.md before doing anything. \
+This repository is a monorepo with apps/web (Next.js) and apps/api (FastAPI). \
 Implement exactly the issue described in state/current-task.md. \
+Touch only the app(s) required for the issue and keep web/api contracts in sync when needed. \
 Do not work on any other issue. \
 Follow AGENT.md and PROMPT.md strictly. \
 At the end, output the structured result block exactly as specified in PROMPT.md, \
